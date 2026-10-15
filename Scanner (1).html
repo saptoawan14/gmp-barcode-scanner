@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>GMP Pemindai Barcode / QR</title>
+<style>
+*{box-sizing:border-box}body{margin:0;padding:clamp(10px,3vw,20px);background:#f3f6fa;color:#17213a;font:15px Arial,sans-serif}
+.panel{max-width:760px;margin:0 auto;background:#fff;border-radius:14px;overflow:hidden;box-shadow:0 8px 28px #0f172a20}
+header{background:#1597e8;color:#fff;padding:17px;font-size:19px;font-weight:800}main{padding:16px}
+#status{padding:12px;background:#eff6ff;border-radius:8px;color:#1e3a5f;line-height:1.5;margin-bottom:12px;white-space:pre-wrap;overflow-wrap:anywhere}
+video,#photoPreview{display:block;width:100%;max-height:52vh;min-height:200px;object-fit:contain;background:#0f172a;border-radius:10px}
+#photoPreview{display:none}
+.row{display:flex;gap:8px;margin-top:13px;flex-wrap:wrap}button,label.filebtn{border:0;border-radius:8px;padding:12px 14px;font-weight:700;font-size:14px;cursor:pointer;display:inline-block}
+button:disabled{opacity:.55;cursor:wait}#start{background:#1597e8;color:#fff}#retry{background:#dbeafe;color:#1e3a5f}#close{background:#e7edf3;color:#17213a}label.filebtn{background:#0f766e;color:#fff}
+#cameraSelect{width:100%;border:1px solid #cbd5e1;border-radius:8px;background:#fff;padding:11px;margin-top:10px}
+#photoInput{display:none}#code{font-weight:800;overflow-wrap:anywhere;color:#047857;margin-top:10px}
+.hint{font-size:12px;color:#64748b;line-height:1.5;margin-top:12px}
+#help{padding:12px;background:#fff7ed;color:#7c2d12;border-radius:8px;line-height:1.5;margin-top:10px;white-space:pre-wrap}
+.hidden{display:none!important}
+</style></head>
+<body><div class="panel">
+<header>📷 Pemindai Barcode / QR — GMP</header><main>
+<div id="status">Siap. Tekan “Aktifkan Kamera” untuk memulai pemindaian langsung.</div>
+<video id="video" autoplay muted playsinline></video><img id="photoPreview" alt="Foto barcode atau QR">
+<select id="cameraSelect" class="hidden" aria-label="Pilih kamera"></select>
+<div id="code"></div>
+<div id="help" class="hidden"></div>
+<div class="hint">Arahkan barcode/QR agar terang, fokus, tidak terpotong, dan memenuhi area kamera. Jika izin kamera langsung ditolak, gunakan opsi foto sebagai jalur alternatif.</div>
+<div class="row">
+<button id="start">Aktifkan Kamera</button><button id="retry">Coba Lagi</button>
+<label class="filebtn" for="photoInput">📷 Foto / Pilih Gambar Barcode</label>
+<input id="photoInput" type="file" accept="image/*" capture="environment">
+<button id="close">Tutup Pemindai</button>
+</div>
+</main></div>
+<script>
+(function(){
+'use strict';
+let stream=null,raf=0,readerControls=null,busy=false,started=false,detector=null,ZX=null,photoUrl=null;
+const video=document.getElementById('video'),statusEl=document.getElementById('status'),codeEl=document.getElementById('code'),cameraSelect=document.getElementById('cameraSelect'),help=document.getElementById('help'),startBtn=document.getElementById('start'),retryBtn=document.getElementById('retry'),photoInput=document.getElementById('photoInput'),photoPreview=document.getElementById('photoPreview');
+function stop(){if(raf)cancelAnimationFrame(raf);raf=0;try{if(readerControls&&readerControls.stop)readerControls.stop()}catch(e){}readerControls=null;if(stream){stream.getTracks().forEach(t=>{try{t.stop()}catch(e){}});stream=null}try{video.pause();video.srcObject=null}catch(e){}started=false}
+function errText(e){return (e&&e.name?e.name+': ':'')+(e&&e.message?e.message:String(e||'Kesalahan tidak diketahui'))}
+function showError(e){
+ stop();help.classList.remove('hidden');const name=e&&e.name||'';let advice='';
+ if(name==='NotAllowedError'||name==='PermissionDeniedError')advice='Browser menolak akses kamera pada halaman ini. Pastikan halaman pemindai di-host pada HTTPS stabil (misalnya GitHub Pages), izinkan kamera untuk origin tersebut, dan periksa izin kamera Windows/perangkat.';
+ else if(name==='NotFoundError'||name==='DevicesNotFoundError')advice='Tidak ada kamera yang terdeteksi. Pastikan kamera terhubung/aktif.';
+ else if(name==='NotReadableError'||name==='TrackStartError')advice='Kamera sedang dipakai aplikasi lain atau diblokir Windows. Tutup aplikasi Kamera, Zoom, Teams, dan tab lain yang memakai kamera.';
+ else if(name==='SecurityError'||!window.isSecureContext)advice='Konteks tidak aman. Buka pemindai melalui URL HTTPS deployment Web App.';
+ else if(name==='OverconstrainedError'||name==='ConstraintNotSatisfiedError')advice='Kamera tidak mendukung pengaturan yang diminta. Pilih kamera lain atau coba lagi.';
+ else advice='Periksa izin situs, izin privasi Windows/perangkat, pilihan kamera, dan koneksi internet untuk mesin pembaca barcode.';
+ statusEl.textContent='Kamera langsung gagal dijalankan.\nDetail teknis: '+errText(e)+'\nOrigin: '+location.origin+'\nSecure context: '+window.isSecureContext+'\nMedia API tersedia: '+!!(navigator.mediaDevices&&navigator.mediaDevices.getUserMedia);
+ help.textContent=advice+'\n\nAlternatif: tekan “Foto / Pilih Gambar Barcode”. Hasil pemindaian akan dikirim ke jendela Invoice Manager jika jendela utama masih terbuka.';
+ startBtn.disabled=false;retryBtn.disabled=false;
+}
+async function loadZXing(){
+ if(window.ZXingBrowser&&window.ZXingBrowser.BrowserMultiFormatReader)return window.ZXingBrowser;
+ const urls=['https://cdn.jsdelivr.net/npm/@zxing/browser@0.1.5/umd/zxing-browser.min.js','https://unpkg.com/@zxing/browser@0.1.5/umd/zxing-browser.min.js'];let errors=[];
+ for(const url of urls){try{await new Promise((res,rej)=>{const sc=document.createElement('script');sc.src=url;sc.async=true;sc.onload=res;sc.onerror=()=>rej(new Error('Tidak dapat memuat '+url));document.head.appendChild(sc)});if(window.ZXingBrowser&&window.ZXingBrowser.BrowserMultiFormatReader)return window.ZXingBrowser;errors.push('API tidak ditemukan: '+url)}catch(e){errors.push(e.message||String(e))}}
+ throw new Error('Mesin pembaca barcode tidak dapat dimuat. Periksa internet/pemblokir konten. '+errors.join(' | '));
+}
+function sendCode(code){
+ if(busy||!code)return;busy=true;const value=String(code).trim();codeEl.textContent='Kode terbaca: '+value;statusEl.textContent='Kode berhasil dibaca. Mengirim hasil ke Invoice Manager…';stop();
+ let delivered=false;try{if(window.opener&&!window.opener.closed){window.opener.postMessage({type:'GMP_BARCODE_SCAN',code:value},'*');delivered=true}}catch(e){}
+ if(!delivered)statusEl.textContent='Kode terbaca: '+value+'\nJendela aplikasi utama tidak terhubung. Salin kode ini dan masukkan ke formulir produk.';
+ startBtn.disabled=false;retryBtn.disabled=false;
+}
+async function cameras(){try{const ds=await navigator.mediaDevices.enumerateDevices(),cs=ds.filter(d=>d.kind==='videoinput');cameraSelect.innerHTML='';cs.forEach((d,i)=>{let o=document.createElement('option');o.value=d.deviceId;o.textContent=d.label||'Kamera '+(i+1);cameraSelect.appendChild(o)});cameraSelect.classList.toggle('hidden',cs.length<2)}catch(e){cameraSelect.classList.add('hidden')}}
+async function start(){
+ stop();busy=false;codeEl.textContent='';help.classList.add('hidden');photoPreview.style.display='none';video.style.display='block';startBtn.disabled=true;retryBtn.disabled=true;statusEl.textContent='Meminta izin kamera…';
+ if(!window.isSecureContext||!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){showError({name:'SecurityError',message:'API kamera tidak tersedia pada origin ini.'});return}
+ try{
+  const selected=cameraSelect.value;let c=selected?{audio:false,video:{deviceId:{exact:selected}}}:{audio:false,video:{facingMode:{ideal:'environment'}}};
+  try{stream=await navigator.mediaDevices.getUserMedia(c)}catch(e){if(e&&['OverconstrainedError','ConstraintNotSatisfiedError','NotFoundError','TypeError'].includes(e.name))stream=await navigator.mediaDevices.getUserMedia({audio:false,video:true});else throw e}
+  video.srcObject=stream;await video.play();started=true;await cameras();statusEl.textContent='Kamera aktif. Arahkan barcode atau QR ke kamera.';
+  if('BarcodeDetector'in window){
+   const all=['qr_code','ean_13','ean_8','code_128','code_39','code_93','upc_a','upc_e','itf','data_matrix','pdf417','aztec'];let fs=all;
+   try{const s=await BarcodeDetector.getSupportedFormats();fs=all.filter(f=>s.includes(f))}catch(e){}
+   try{detector=new BarcodeDetector(fs.length?{formats:fs}:undefined)}catch(e){detector=null}
+   if(detector){const scan=async()=>{if(!stream||!started||busy)return;try{if(video.readyState>=2){const hits=await detector.detect(video);if(hits&&hits.length){sendCode(hits[0].rawValue);return}}}catch(e){}raf=requestAnimationFrame(scan)};raf=requestAnimationFrame(scan)}
+   else{ZX=await loadZXing();const reader=new ZX.BrowserMultiFormatReader();readerControls=await reader.decodeFromVideoElement(video,(result)=>{if(result&&!busy)sendCode(result.getText())})}
+  }else{ZX=await loadZXing();const reader=new ZX.BrowserMultiFormatReader();readerControls=await reader.decodeFromVideoElement(video,(result)=>{if(result&&!busy)sendCode(result.getText())})}
+  startBtn.disabled=false;retryBtn.disabled=false;
+ }catch(e){showError(e)}
+}
+async function scanPhoto(file){
+ if(!file)return;stop();busy=false;help.classList.add('hidden');statusEl.textContent='Membaca gambar barcode/QR…';codeEl.textContent='';
+ try{
+  if(photoUrl)URL.revokeObjectURL(photoUrl);photoUrl=URL.createObjectURL(file);photoPreview.src=photoUrl;photoPreview.style.display='block';video.style.display='none';
+  await new Promise((res,rej)=>{photoPreview.onload=res;photoPreview.onerror=rej});
+  if('BarcodeDetector'in window){try{const d=new BarcodeDetector();const hits=await d.detect(photoPreview);if(hits&&hits.length){sendCode(hits[0].rawValue);return}}catch(e){}}
+  ZX=await loadZXing();const reader=new ZX.BrowserMultiFormatReader();const result=await reader.decodeFromImageElement(photoPreview);if(result){sendCode(result.getText());return}
+  statusEl.textContent='Barcode/QR belum terbaca dari gambar. Ambil foto lebih dekat, terang, fokus, dan tidak terpotong lalu coba lagi.';
+ }catch(e){statusEl.textContent='Gagal membaca gambar: '+errText(e)+'. Pastikan koneksi internet tersedia untuk mesin pemindai.'}
+}
+startBtn.addEventListener('click',start);retryBtn.addEventListener('click',start);cameraSelect.addEventListener('change',start);photoInput.addEventListener('change',()=>scanPhoto(photoInput.files&&photoInput.files[0]));document.getElementById('close').addEventListener('click',()=>{stop();try{window.close()}catch(e){}});window.addEventListener('beforeunload',()=>{stop();if(photoUrl)URL.revokeObjectURL(photoUrl)});
+})();
+</script></body></html>
